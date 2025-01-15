@@ -1,4 +1,5 @@
-from fastapi import FastAPI, Body as body
+from fastapi import FastAPI, Depends, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from db.db_items import insert_item, create_connection, create_table, fetch_items, fetch_item_by_id, update_item, delete_item
 
@@ -14,138 +15,88 @@ def on_startup():
         create_table(conn)  # Create the table if it doesn't exist
         conn.close()
 
+# Database connection dependency (update from V0 where connection was created repeatedly)
+def get_db_connection():
+    """
+    Dependency to provide a database connection.
+    Automatically closes the connection after use.
+    """
+    conn = create_connection(db_file)
+    try:
+        yield conn  # Provide the connection to the endpoint
+    finally:
+        conn.close()
+
+# Schema with limits
 class Item(BaseModel):
-    name: str = Field()
-    description: str = Field()
-    price: float = Field()
+    name: str = Field(..., min_length=1, max_length=50)
+    description: str = Field(default="", max_length=200)
+    price: float = Field(..., ge=0)
 
 ###########################
-# Define a root endpoint
+
+# Connection prompt (revise comment)
 @app.get("/")
 def read_root():
-    return {"message": "Welcome to your FastAPI application!"}
+    """Root endpoint."""
+    return {"message": "Welcome to the API"}
+
+# Endpoint  - get all items
 @app.get("/items")
-def get_items():
-    conn = create_connection(db_file)
-    return fetch_items(conn)
+def get_items(conn=Depends(get_db_connection)):
+    """Retrieve all items."""
+    items=fetch_items(conn)
+    items=[Item(name=item[1],description=item[2],price=item[3]).dict() for item in items]
+    return JSONResponse(status_code=200, content=items)
 
-# Example endpoint
+# Endpoint - Read item
 @app.get("/items/{item_id}")
-def read_item(item_id: int):
-    """
-    Retrieve an item by its ID and optionally include a query string parameter.
-    """
-    conn = create_connection(db_file)
-    return fetch_item_by_id(conn,item_id)
+def read_item(item_id: int, conn=Depends(get_db_connection)):
+    """Retrieve a single item by ID."""
+    item=fetch_item_by_id(conn, item_id)
+    item=Item(name=item[1],description=item[2],price=item[3]).dict()
+    if not item:
+        raise HTTPException(status_code=404, detail="Item not found")
+    return JSONResponse(status_code=200, content=item)
 
-# Example endpoint for creating an item
+# Endpoint - Create item
 @app.post("/items/")
-def create_item(item: Item = body(...)):
-    """
-    Create a new item and return its details.
-    """
-    conn = create_connection(db_file)
+def create_item(item: Item, conn=Depends(get_db_connection)):
+    """Create a new item."""
     insert_item(conn, item)
-    conn.close()  # Ensure the connection is closed after use
-    return {
-        "name": item.name,
-        "description": item.description,
-        "price": item.price,
-    }
+    return {"message": "Item created successfully", "item": item.model_dump()}
 
+# Endpoint - Update item
 @app.put("/items/{item_id}")
-def put_item(item_id: int, item: Item = body(...)):
-    '''
-    Update an item by its ID
-    '''
-    conn = create_connection(db_file)
+def put_item(item_id: int, item: Item, conn=Depends(get_db_connection)):
+    """Update an existing item."""
+    existing_item = fetch_item_by_id(conn, item_id)
+    if not existing_item:
+        raise HTTPException(status_code=404, detail="Item not found")
     updated_item = {
         "name": item.name,
         "description": item.description,
         "price": item.price,
     }
     update_item(conn, item_id, updated_item)
-    updated_item["item_id"] = item_id
-    return updated_item
+    return {"message": "Item updated successfully", "item": updated_item}
 
+# Endpoint - Delete item
 @app.delete("/items/{item_id}")
-def nuke_item(item_id):
-    '''
-    Update an item by its ID
-    '''
-    conn = create_connection(db_file)
+def nuke_item(item_id: int, conn=Depends(get_db_connection)):
+    """Delete an item."""
+    item = fetch_item_by_id(conn, item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Item not found")
     delete_item(conn, item_id)
-    return
+    return JSONResponse(status_code=204, content={"message": f"Item {item_id} deleted"})
 
 
 ###########################
-
+# Main (8000 port taken, used 8080)
 if __name__ == "__main__":
     import uvicorn
 
     # Run the FastAPI application using uvicorn
     uvicorn.run(app, host="127.0.0.1", port=8080)
 
-
-
-
-
-
-##########################################################
-#OG
-##########################################################
-'''from fastapi import FastAPI, Body as body
-from pydantic import BaseModel, Field
-from db.db_items import insert_item, create_connection, create_table
-
-# Create FastAPI instance
-app = FastAPI()
-db_file = "items.db"
-class Item(BaseModel):
-    name: str = Field()
-    description: str = Field()
-    price: float = Field()
-
-###########################
-# Define a root endpoint
-@app.get("/")
-def read_root():
-    return {"message": "Welcome to your FastAPI application!"}
-
-# Example endpoint
-@app.get("/items/{item_id}")
-def read_item(item_id: int, q: str = None):
-    """
-    Retrieve an item by its ID and optionally include a query string parameter.
-    """
-    return {"item_id": item_id, "q": q}
-
-# Example endpoint for creating an item
-@app.post("/items/")
-def create_item(item: Item=body(...)):
-    """
-    Create a new item and return its details.
-    """
-    # ln 50 closes db - this reopens db
-    conn = create_connection(db_file)
-    insert_item(conn,item)
-    return {
-        "name": item.name,
-        "description": item.description,
-        "price": item.price,
-    }
-###########################
-
-if __name__ == "__main__":
-    import uvicorn
-
-    # Run the FastAPI application using uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8080) # local host - uvicorn main:app --host 127.0.0.1 --port 8080 --reload # port:8000 was likely taken up by other prgm
-
-    # Establish connection and setup the database
-    conn = create_connection(db_file)
-    print(conn)
-    if conn:
-        create_table(conn)
-        conn.close()
-'''
